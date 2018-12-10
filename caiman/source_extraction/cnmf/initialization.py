@@ -350,6 +350,9 @@ def initialize_components(Y, K=30, gSig=[5, 5], gSiz=None, ssub=1, tsub=1, nIter
         b_in = cnmf_obj.b
         f_in = cnmf_obj.f
 
+    elif method == 'corr_local_max':
+        Ain, Cin, _, b_in, f_in = corr_local_max(Y, gSig, remove_baseline)
+
     else:
 
         print(method)
@@ -1687,6 +1690,53 @@ def nnsvd_init(X,n_components,eps=1e-6,random_state=None):
     C = W.T
     A = H.T
     return A,C #
+
+def corr_local_max(Y, gSig, remove_baseline, sigma_smooth=(.5, .5, .5), truncate=2, perc_baseline=20, nb=1):
+    print('gSig:', gSig)
+    m = scipy.ndimage.gaussian_filter(np.transpose(
+        Y, [2, 0, 1]), sigma=sigma_smooth, mode='nearest', truncate=truncate)
+    if remove_baseline:
+        bl = np.percentile(m, perc_baseline, axis=0)
+        m1 = np.maximum(0, m - bl)
+    else:
+        bl = np.zeros(m.shape[1:])
+        m1 = m
+    d1, d2, T = Y.shape
+    d = d1 * d2
+    yr = np.reshape(m1, [T, d], order='F')
+    Cn = caiman.summary_images.local_correlations(Y)
+    Cn = scipy.ndimage.gaussian_filter(Cn, 2)
+    from skimage.feature import peak_local_max
+    center = peak_local_max(Cn, min_distance = 5, threshold_abs=0.25, indices=True)
+    K = center.shape[0]
+    print('K:', K)
+    
+    grid_indices = np.indices((d1, d2))
+    masks = np.zeros((K, d1, d2))
+    for i, c in enumerate(center):
+       masks[i] = (grid_indices[0] - c[0]) ** 2 / gSig[0] + (grid_indices[1] - c[1]) ** 2 / gSig[1] <= 1
+
+    if masks.size > 0:
+        print('m1 shape:', m1.shape)
+        print('masks shape:', masks.shape)
+        C_in = caiman.base.movies.movie(
+            m1).extract_traces_from_masks(np.array(masks)).T
+        A_in = np.reshape(masks, [-1, d1 * d2], order='F').T
+
+    else:
+
+        A_in = np.zeros([d1 * d2, K])
+        C_in = np.zeros([K, T])
+
+    m1 = yr.T - A_in.dot(C_in) + np.maximum(0, bl.flatten())[:, np.newaxis]
+
+    model = NMF(n_components=nb, init='random', random_state=0)
+
+
+    b_in = model.fit_transform(np.maximum(m1, 0)).astype(np.float32)
+    f_in = model.components_.astype(np.float32)
+    return A_in, C_in, center, b_in, f_in
+    
 #%%
 def norm(x):
     """Dot product-based Euclidean norm implementation
